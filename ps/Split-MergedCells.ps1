@@ -120,9 +120,25 @@ function Find-HeaderCell {
 
 foreach ($file in $files) {
     Write-Host "処理中: $($file.FullName)"
+
+    # ファイルサイズが0の場合、OneDrive/SharePointの「オンラインのみ」プレースホルダー
+    # である可能性が高く、COM経由では正しく開けないため事前にスキップする
+    if ($file.Length -eq 0) {
+        Write-Host "  -> ファイルサイズが 0 バイトです。OneDrive/SharePoint の同期状態が" -ForegroundColor Red
+        Write-Host "     「オンラインのみ」になっている可能性があります。エクスプローラーで" -ForegroundColor Red
+        Write-Host "     このファイルを右クリック → 「このデバイス上で常に保持する」を選択し、" -ForegroundColor Red
+        Write-Host "     ダウンロード完了後に再実行してください。スキップします。" -ForegroundColor Red
+        $skipCount++
+        continue
+    }
+
     $wb = $null
     try {
         $wb = $excel.Workbooks.Open($file.FullName, [Type]::Missing, $false)  # ReadOnly=$false
+
+        if ($null -eq $wb) {
+            throw "ワークブックを開けませんでした(Workbooks.Open が null を返しました)。ファイルが破損しているか、他のプロセスでロックされている可能性があります。"
+        }
         $changedAny = $false
         $anyTargetSheetFound = $false
 
@@ -222,6 +238,10 @@ foreach ($file in $files) {
     }
     catch {
         Write-Host "  -> エラー: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "     発生行: $($_.InvocationInfo.ScriptLineNumber) / 例外種別: $($_.Exception.GetType().FullName)" -ForegroundColor DarkRed
+        if ($_.Exception.InnerException) {
+            Write-Host "     内部例外: $($_.Exception.InnerException.Message)" -ForegroundColor DarkRed
+        }
         $errorCount++
         if ($null -ne $wb) {
             try { $wb.Close($false) } catch {}
