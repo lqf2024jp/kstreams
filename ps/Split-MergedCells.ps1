@@ -196,6 +196,8 @@ foreach ($file in $files) {
                         $topLeftCell = $ws.Cells([int]$mergeArea.Row, [int]$mergeArea.Column)
                         $val = $topLeftCell.Value2
                         if ($null -eq $val) { $val = "" }
+                        # [DEBUG] 210行目の InvalidCastException 調査用。原因判明後に削除。
+                        Write-Host "    [DEBUG] val='$val' / type=$($val.GetType().FullName)" -ForegroundColor DarkGray
 
                         $mRowCountRaw = $mergeArea.Rows.Count
                         $mRowCount = [int]$mRowCountRaw
