@@ -190,7 +190,10 @@ foreach ($file in $files) {
                     # ヘッダーと同じ列幅の結合だけを対象にする(無関係な結合を誤って壊さないため)
                     if ($mStartCol -eq $startCol -and $mEndCol -eq $endCol) {
                         # 取得と代入を1行にチェーンさせない(PowerShell+Excel COMの既知の不具合を回避)
-                        $topLeftCell = $mergeArea.Cells(1, 1)
+                        # $mergeArea.Cells(1,1) はまれに NullReferenceException / InvalidCastException を
+                        # 起こすことがあるため、既にワークシート全体で使っている $ws.Cells(row, col) の
+                        # 呼び出し方に統一して同じ結果(結合範囲の左上セル)を取得する
+                        $topLeftCell = $ws.Cells([int]$mergeArea.Row, [int]$mergeArea.Column)
                         $val = $topLeftCell.Value2
                         if ($null -eq $val) { $val = "" }
 
