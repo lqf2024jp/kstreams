@@ -97,10 +97,10 @@ function Find-HeaderCell {
     param($ws, [int]$maxRows)
 
     $usedRange = $ws.UsedRange
-    $firstRow = $usedRange.Row
-    $firstCol = $usedRange.Column
-    $totalRows = $usedRange.Rows.Count
-    $totalCols = $usedRange.Columns.Count
+    $firstRow = [int]$usedRange.Row
+    $firstCol = [int]$usedRange.Column
+    $totalRows = [int]$usedRange.Rows.Count
+    $totalCols = [int]$usedRange.Columns.Count
 
     $lastRow = $firstRow + $totalRows - 1
     $lastCol = $firstCol + $totalCols - 1
@@ -109,9 +109,10 @@ function Find-HeaderCell {
 
     for ($r = $firstRow; $r -le $searchLastRow; $r++) {
         for ($c = $firstCol; $c -le $lastCol; $c++) {
-            $v = $ws.Cells($r, $c).Value2
+            $targetCell = $ws.Cells($r, $c)
+            $v = $targetCell.Value2
             if ($v -eq "項番") {
-                return $ws.Cells($r, $c)
+                return $targetCell
             }
         }
     }
@@ -168,7 +169,10 @@ foreach ($file in $files) {
             $endCol = $headerMerge.Column + $headerMerge.Columns.Count - 1
 
             # そのヘッダー列における最終データ行を取得
-            $lastRow = $ws.Cells($ws.Rows.Count, $startCol).End($xlUp).Row
+            $totalSheetRows = [int]$ws.Rows.Count
+            $bottomCell = $ws.Cells($totalSheetRows, $startCol)
+            $lastCellInCol = $bottomCell.End($xlUp)
+            $lastRow = [int]$lastCellInCol.Row
             if ($lastRow -le $headerEndRow) {
                 Write-Host "  [$sheetName] データ行が無いためスキップ" -ForegroundColor Yellow
                 continue
@@ -185,17 +189,27 @@ foreach ($file in $files) {
 
                     # ヘッダーと同じ列幅の結合だけを対象にする(無関係な結合を誤って壊さないため)
                     if ($mStartCol -eq $startCol -and $mEndCol -eq $endCol) {
-                        $val = $mergeArea.Cells(1, 1).Value2
-                        $mRowCount = $mergeArea.Rows.Count
+                        # 取得と代入を1行にチェーンさせない(PowerShell+Excel COMの既知の不具合を回避)
+                        $topLeftCell = $mergeArea.Cells(1, 1)
+                        $val = $topLeftCell.Value2
+                        if ($null -eq $val) { $val = "" }
+
+                        $mRowCountRaw = $mergeArea.Rows.Count
+                        $mRowCount = [int]$mRowCountRaw
+
                         $mergeArea.UnMerge()
+
                         for ($i = 0; $i -lt $mRowCount; $i++) {
                             for ($c = $startCol; $c -le $endCol; $c++) {
-                                $ws.Cells($r + $i, $c).Value2 = $val
+                                $targetRow = [int]($r + $i)
+                                $targetCol = [int]$c
+                                $targetCell = $ws.Cells($targetRow, $targetCol)
+                                $targetCell.Value2 = $val
                             }
                         }
                         $changedAny = $true
                         $sheetChanged = $true
-                        $r = $r + $mRowCount
+                        $r = [int]($r + $mRowCount)
                         continue
                     }
                 }
