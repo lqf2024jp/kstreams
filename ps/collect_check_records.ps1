@@ -143,11 +143,16 @@ $errorFiles = @()
 
 foreach ($file in $files) {
 
-    # ファイル名が「標準化ルール適用チェックリスト(...)」形式でなければ対象外
-    if ($file.BaseName -notmatch '標準化ルール適用チェックリスト\s*[（(]\s*(.+?)\s*[）)]') {
+    # ファイル名が「標準化ルール適用チェックリスト(...)」または
+    # 「標準化ルール適用チェックリスト_...」(括弧を使わないファイルもある)形式で
+    # なければ対象外
+    if ($file.BaseName -match '標準化ルール適用チェックリスト\s*[（(]\s*(.+?)\s*[）)]') {
+        $inner = $matches[1]
+    } elseif ($file.BaseName -match '標準化ルール適用チェックリスト_(.+)$') {
+        $inner = $matches[1]
+    } else {
         continue
     }
-    $inner = $matches[1]
     if ($inner -match '^([A-Za-z]{2}(?:_[0-9]+)+)_(.+)$') {
         $id = $matches[1]
         $label = $matches[2]
