@@ -10,7 +10,9 @@
     - フォルダ内(既定ではスクリプト自身の場所)の xlsx を再帰的に検索
     - 各ファイルのシートのうち、名前が「画面(基本設計)」「帳票(基本設計)」の
       2つだけを処理対象とする(それ以外のシート名は無条件でスキップ)
-    - 対象シート内で、セル値が "項番" のヘッダーセルを探す(結合セルでもOK)
+    - 対象シート内で、セル値が "項番" のヘッダーセルを、UsedRange内を
+      手動でループして探す(Find メソッドは COM 経由だと型キャストエラーが
+      出やすいため使用しない)
     - そのヘッダーが属する結合範囲の「列幅」を基準に、
       ヘッダー行より下にある同じ列幅の結合セルをすべて解除
     - 解除後、結合されていた範囲の全セルに元の値をコピー
@@ -28,6 +30,10 @@
     指定しない場合は "元ファイル名_split.xlsx" として別名保存し、
     元ファイルは変更しない(既定・安全側)。
 
+.PARAMETER HeaderSearchMaxRows
+    「項番」ヘッダーを探す際に走査する最大行数(表の先頭からの範囲)。
+    既定 30 行。表のヘッダーがそれより下にある特殊なファイルがあれば増やす。
+
 .EXAMPLE
     # 既定:スクリプト自身のフォルダ以下を再帰的に処理し、別名で保存
     .\Split-MergedCells.ps1
@@ -35,17 +41,14 @@
 .EXAMPLE
     # 元ファイルを直接上書き
     .\Split-MergedCells.ps1 -Overwrite
-
-.EXAMPLE
-    # 別のフォルダを指定し、サブフォルダは含めない
-    .\Split-MergedCells.ps1 -FolderPath "C:\work\work\販売③" -Recurse:$false
 #>
 
 param(
     [string]$FolderPath = $PSScriptRoot,
     [bool]$Recurse = $true,
     [switch]$Overwrite,
-    [string]$OutSuffix = "_split"
+    [string]$OutSuffix = "_split",
+    [int]$HeaderSearchMaxRows = 30
 )
 
 # 処理対象とするシート名(この2つ以外のシートは無条件でスキップ)
@@ -88,6 +91,33 @@ $successCount = 0
 $skipCount = 0
 $errorCount = 0
 
+# 「項番」ヘッダーセルを、UsedRange内を手動ループして探す
+# (COM経由のFindメソッドは型キャストエラーが出やすいため使わない)
+function Find-HeaderCell {
+    param($ws, [int]$maxRows)
+
+    $usedRange = $ws.UsedRange
+    $firstRow = $usedRange.Row
+    $firstCol = $usedRange.Column
+    $totalRows = $usedRange.Rows.Count
+    $totalCols = $usedRange.Columns.Count
+
+    $lastRow = $firstRow + $totalRows - 1
+    $lastCol = $firstCol + $totalCols - 1
+
+    $searchLastRow = [Math]::Min($lastRow, $firstRow + $maxRows - 1)
+
+    for ($r = $firstRow; $r -le $searchLastRow; $r++) {
+        for ($c = $firstCol; $c -le $lastCol; $c++) {
+            $v = $ws.Cells($r, $c).Value2
+            if ($v -eq "項番") {
+                return $ws.Cells($r, $c)
+            }
+        }
+    }
+    return $null
+}
+
 foreach ($file in $files) {
     Write-Host "処理中: $($file.FullName)"
     $wb = $null
@@ -108,13 +138,8 @@ foreach ($file in $files) {
             }
             $anyTargetSheetFound = $true
 
-            # --- 「項番」ヘッダーセルを探す ---
-            $headerCell = $null
-            $usedRange = $ws.UsedRange
-            $found = $usedRange.Find("項番", [Type]::Missing, -4163, 1)  # xlValues, xlWhole
-            if ($null -ne $found) {
-                $headerCell = $found
-            }
+            # --- 「項番」ヘッダーセルを探す(手動ループ) ---
+            $headerCell = Find-HeaderCell -ws $ws -maxRows $HeaderSearchMaxRows
 
             if ($null -eq $headerCell) {
                 Write-Host "  [$sheetName] 「項番」ヘッダーが見つからず、スキップ" -ForegroundColor Yellow
@@ -137,13 +162,13 @@ foreach ($file in $files) {
             $sheetChanged = $false
             while ($r -le $lastRow) {
                 $cell = $ws.Cells($r, $startCol)
-                if ($cell.MergeCells) {
+                if ($cell.MergeCells -eq $true) {
                     $mergeArea = $cell.MergeArea
                     $mStartCol = $mergeArea.Column
                     $mEndCol = $mergeArea.Column + $mergeArea.Columns.Count - 1
 
                     # ヘッダーと同じ列幅の結合だけを対象にする(無関係な結合を誤って壊さないため)
-                    if ($mStartCol -eq $startCol -and $mEndCol -eq $endCol -and $mergeArea.Rows.Count -ge 1) {
+                    if ($mStartCol -eq $startCol -and $mEndCol -eq $endCol) {
                         $val = $mergeArea.Cells(1, 1).Value2
                         $mRowCount = $mergeArea.Rows.Count
                         $mergeArea.UnMerge()
