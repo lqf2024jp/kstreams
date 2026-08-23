@@ -284,11 +284,20 @@ foreach ($file in $files) {
                         $mergeArea.UnMerge()
                         Write-Host "    結合解除完了、値の書き込み開始"
 
+                        # 空文字列を Value2 に直接代入すると InvalidCastException になる環境があることを
+                        # 実機ログで確認済み(空の結合セルでよく発生)。空文字列のときは最初から [string] で
+                        # 書き込み、無駄な例外発生(処理速度低下・ログのノイズ)を避ける
+                        $skipDirectWrite = ($val -is [string] -and [string]::IsNullOrEmpty($val))
+
                         for ($i = 0; $i -lt $mRowCount; $i++) {
                             for ($c = $startCol; $c -le $endCol; $c++) {
                                 $targetRow = [int]($r + $i)
                                 $targetCol = [int]$c
                                 $targetCell = $ws.Cells($targetRow, $targetCol)
+                                if ($skipDirectWrite) {
+                                    $targetCell.Value2 = [string]$val
+                                    continue
+                                }
                                 try {
                                     $targetCell.Value2 = $val
                                 }
