@@ -1,21 +1,29 @@
 ﻿<#
 .SYNOPSIS
-    実施記録一覧.xlsx(長い形式: 1行 = 1ファイルの1項番の記録)を、
-    1行 = 1ファイル、列 = 項番 の一覧表(out.xlsx)に変換するスクリプト。
+    実施記録一覧_merge_after.xlsx(長い形式: 1行 = 1IDの1項番の、既にバージョン間で
+    マージ済みの記録)を、1行 = 1ID(機能)、列 = 項番 の一覧表(out.xlsx)に変換する
+    スクリプト。
 
 .DESCRIPTION
-    - 実施記録一覧.xlsx をファイル名でグループ化し、各ファイルの各項番について
-      「NGが1件でもあればNG、無ければOKが1件でもあればOK、どちらも無ければ空欄」
-      というルールで結果を1つにまとめる
+    - 実施記録一覧_merge_after.xlsx は merge_versions_by_id.ps1 が既に
+      「同じIDの複数バージョンの中から項番ごとに採用すべき結果を1つに決める」
+      処理を済ませた長い形式のデータなので、このスクリプトでは
+      ファイル内の重複解消(NG優先マージ)は行わない。ID単位で項番をそのまま
+      列に展開するだけでよい。
     - out.xlsx の1~3行目(見出し・項番の並び・列幅など)は一切変更しない。
       1行目E列以降に既に入っている項番の並び順・重複もそのまま使う
     - out.xlsx 自体を開いて4行目以降だけを書き換える(新しいファイルは作らない)
+    - 1つのIDの中で項番によって採用元ファイルが異なる場合があるため、
+      ファイル名 列には実際に採用された結果を持つ全ファイルを、
+      バージョンの新しい順に列挙する。項番が1件も無いID(全バージョンで
+      未実施)は、merge_versions_by_id.ps1 が残した空行から
+      そのままファイル名だけ引き継ぐ。
 
 .PARAMETER FolderPath
     処理対象のフォルダ。既定値はこのスクリプト自身が置かれているフォルダ($PSScriptRoot)。
 
 .PARAMETER InFileName
-    入力ファイル名。既定値 "実施記録一覧.xlsx"。
+    入力ファイル名。既定値は実行日の日付付きで "yyyyMMdd_実施記録一覧_merge_after.xlsx"。
 
 .PARAMETER OutFileName
     出力先ファイル名。既定値 "out.xlsx"。このファイル自体を開いて4行目以降を書き換える
@@ -27,7 +35,7 @@
 
 param(
     [string]$FolderPath = $PSScriptRoot,
-    [string]$InFileName = "実施記録一覧.xlsx",
+    [string]$InFileName = "$(Get-Date -Format 'yyyyMMdd')_実施記録一覧_merge_after.xlsx",
     [string]$OutFileName = "out.xlsx"
 )
 
@@ -58,6 +66,70 @@ function Find-HeaderColumn {
     return $null
 }
 
+# out.xlsx が想定どおりの形式(1行目E列="項番"、3行目A~D列="担当領域/ID/名称/ファイル名")
+# になっているかを確認する。ずれている問題点のリストを返す(空なら問題なし)。
+function Test-OutTemplateFormat {
+    param($sheet)
+
+    $problems = @()
+
+    $expectedLabels = @("担当領域", "ID", "名称", "ファイル名")
+    for ($c = 1; $c -le 4; $c++) {
+        $actual = $sheet.Cells(3, $c).Text
+        $expected = $expectedLabels[$c - 1]
+        if ($actual -ne $expected) {
+            $colLetter = [char](64 + $c)
+            $problems += "3行目 ${colLetter}列: 期待値='$expected' / 実際の値='$actual'"
+        }
+    }
+
+    $itemLabel = $sheet.Cells(1, 5).Text
+    if ($itemLabel -ne "チェックリスト項番") {
+        $problems += "1行目 E列: 期待値='チェックリスト項番' / 実際の値='$itemLabel'"
+    }
+
+    return $problems
+}
+
+# ファイル名の末尾からバージョン番号を抜き出す(merge_versions_by_id.ps1 と同じロジック)。
+# ファイル名列に複数ファイルを新しい順で列挙するために使う。
+function Get-FileVersionKey {
+    param([string]$fileName)
+
+    if ($fileName -match '(?:Ver)?(\d+(?:\.\d+)+)([A-Za-z]?)\.xlsx$') {
+        try {
+            $ver = [version]$matches[1]
+        } catch {
+            return $null
+        }
+        return [PSCustomObject]@{ Version = $ver; Suffix = $matches[2] }
+    }
+    return $null
+}
+
+# ファイル名の末尾からバージョン部分と拡張子を取り除いた「素の」ファイル名を返す。
+# 同じIDの複数バージョンは、バージョン番号を除けば同一のファイル名になるはずなので、
+# ファイル名列にはこれを1つだけ表示する(バージョン違いの同じ名前を何度も並べない)。
+function Get-BaseFileName {
+    param([string]$fileName)
+
+    $base = $fileName -replace '_?(?:Ver)?\d+(?:\.\d+)+[A-Za-z]?\.xlsx$', ''
+    $base = $base -replace '\.xlsx$', ''
+    return $base
+}
+
+function Compare-FileVersionKey {
+    param($a, $b)
+
+    if ($null -eq $a -and $null -eq $b) { return 0 }
+    if ($null -eq $a) { return -1 }
+    if ($null -eq $b) { return 1 }
+
+    $cmp = $a.Version.CompareTo($b.Version)
+    if ($cmp -ne 0) { return $cmp }
+    return [string]::Compare($a.Suffix, $b.Suffix, [System.StringComparison]::Ordinal)
+}
+
 $excel = $null
 $wbIn = $null
 $wbOut = $null
@@ -69,41 +141,46 @@ try {
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
 
-    # ---- 実施記録一覧.xlsx を読み込む ----
+    # ---- 実施記録一覧_merge_after.xlsx を読み込む ----
     $wbIn = $excel.Workbooks.Open($inPath, [Type]::Missing, $true)  # ReadOnly
     $wsIn = $wbIn.Worksheets.Item(1)
     $usedIn = $wsIn.UsedRange
     $lastColIn = [int]$usedIn.Column + [int]$usedIn.Columns.Count - 1
     $lastRowIn = [int]$usedIn.Row + [int]$usedIn.Rows.Count - 1
 
-    $colTopFolder = Find-HeaderColumn -ws $wsIn -text "担当領域" -lastCol $lastColIn
-    $colId         = Find-HeaderColumn -ws $wsIn -text "ID"       -lastCol $lastColIn
-    $colLabel      = Find-HeaderColumn -ws $wsIn -text "名称"     -lastCol $lastColIn
-    $colFileName   = Find-HeaderColumn -ws $wsIn -text "ファイル名" -lastCol $lastColIn
-    $colItemNo     = Find-HeaderColumn -ws $wsIn -text "項番"     -lastCol $lastColIn
-    $colResult     = Find-HeaderColumn -ws $wsIn -text "結果"     -lastCol $lastColIn
+    $colTopFolder = Find-HeaderColumn -ws $wsIn -text "担当領域"   -lastCol $lastColIn
+    $colId        = Find-HeaderColumn -ws $wsIn -text "ID"         -lastCol $lastColIn
+    $colLabel     = Find-HeaderColumn -ws $wsIn -text "名称"       -lastCol $lastColIn
+    $colFileName  = Find-HeaderColumn -ws $wsIn -text "ファイル名" -lastCol $lastColIn
+    $colItemNo    = Find-HeaderColumn -ws $wsIn -text "項番"       -lastCol $lastColIn
+    $colResult    = Find-HeaderColumn -ws $wsIn -text "結果"       -lastCol $lastColIn
 
     if ($null -eq $colTopFolder -or $null -eq $colId -or $null -eq $colLabel -or
         $null -eq $colFileName -or $null -eq $colItemNo -or $null -eq $colResult) {
         throw "$InFileName の1行目から必要な列(担当領域/ID/名称/ファイル名/項番/結果)が見つかりませんでした。"
     }
 
-    # ファイル名をキーに、ファイル情報と「項番 -> 結果(OK/NG)」の対応を集計する
-    # (Ordered なので、実施記録一覧.xlsx に最初に出てきた順でファイルが並ぶ)
-    $files = [ordered]@{}
+    # ID単位で集計する。merge_after は既にバージョン間のマージが済んでいるので、
+    # ここでは項番ごとの結果とファイル名をそのまま受け取るだけでよい。
+    $ids = [ordered]@{}
 
     for ($r = 2; $r -le $lastRowIn; $r++) {
-        $fileName = $wsIn.Cells($r, $colFileName).Text
-        if ([string]::IsNullOrEmpty($fileName)) { continue }
+        $id = $wsIn.Cells($r, $colId).Text
+        if ([string]::IsNullOrEmpty($id)) { continue }
 
-        if (-not $files.Contains($fileName)) {
-            $files[$fileName] = [PSCustomObject]@{
-                担当領域   = $wsIn.Cells($r, $colTopFolder).Text
-                ID         = $wsIn.Cells($r, $colId).Text
-                名称       = $wsIn.Cells($r, $colLabel).Text
-                ファイル名 = $fileName
-                項番結果   = @{}   # 項番 -> "OK" / "NG"
+        if (-not $ids.Contains($id)) {
+            $ids[$id] = [PSCustomObject]@{
+                担当領域         = $wsIn.Cells($r, $colTopFolder).Text
+                名称             = $wsIn.Cells($r, $colLabel).Text
+                項番結果         = @{}          # 項番 -> 結果
+                ContributingFiles = [ordered]@{} # ファイル名 -> $true (登場順の重複排除用)
             }
+        }
+        $entry = $ids[$id]
+
+        $fileName = $wsIn.Cells($r, $colFileName).Text
+        if (-not [string]::IsNullOrEmpty($fileName) -and -not $entry.ContributingFiles.Contains($fileName)) {
+            $entry.ContributingFiles[$fileName] = $true
         }
 
         $itemNo = $wsIn.Cells($r, $colItemNo).Text
@@ -111,22 +188,69 @@ try {
         if ([string]::IsNullOrEmpty($itemNo)) { continue }
         if ($result -ne "OK" -and $result -ne "NG") { continue }
 
-        $entry = $files[$fileName]
-        if ($result -eq "NG") {
-            $entry.項番結果[$itemNo] = "NG"
-        } elseif (-not $entry.項番結果.ContainsKey($itemNo)) {
-            $entry.項番結果[$itemNo] = "OK"
-        }
+        $entry.項番結果[$itemNo] = $result
     }
-
-    $records = $files.Values | Sort-Object 担当領域, ID, ファイル名
 
     $wbIn.Close($false)
     $wbIn = $null
 
+    if ($ids.Count -eq 0) {
+        Write-Host "$InFileName に有効なレコードが見つかりませんでした。" -ForegroundColor Yellow
+        exit
+    }
+
+    $records = @()
+    foreach ($id in $ids.Keys) {
+        $entry = $ids[$id]
+
+        # 実際に採用された全ファイルを新しい順に並べる
+        $fileList = @($entry.ContributingFiles.Keys)
+        for ($i = 0; $i -lt $fileList.Count; $i++) {
+            for ($j = $i + 1; $j -lt $fileList.Count; $j++) {
+                $vi = Get-FileVersionKey -fileName $fileList[$i]
+                $vj = Get-FileVersionKey -fileName $fileList[$j]
+                if ((Compare-FileVersionKey $vi $vj) -lt 0) {
+                    $tmp = $fileList[$i]; $fileList[$i] = $fileList[$j]; $fileList[$j] = $tmp
+                }
+            }
+        }
+
+        # ファイル名列: バージョン番号を取り除いた「素の」ファイル名を表示する。
+        # 同じIDの複数バージョンはバージョン番号を除けば同一名になるはずなので、
+        # 重複を除いた上で(新しい順のまま)並べる。長いバージョン付きファイル名を
+        # 複数連結すると読みにくく、古いExcelで表示が崩れることもあるため。
+        $baseNames = @()
+        foreach ($f in $fileList) {
+            $base = Get-BaseFileName -fileName $f
+            if ($baseNames -notcontains $base) { $baseNames += $base }
+        }
+
+        $records += [PSCustomObject]@{
+            担当領域   = $entry.担当領域
+            ID         = $id
+            名称       = $entry.名称
+            ファイル名 = ($baseNames -join "、")
+            項番結果   = $entry.項番結果
+        }
+    }
+
+    # 結果が1件だけの場合でも配列のままにする(単一オブジェクトだと.Countが効かない)
+    $records = @($records | Sort-Object 担当領域, ID)
+
     # ---- out.xlsx 自体を書き込み可能で開く(1~3行目は一切書き換えない) ----
     $wbOut = $excel.Workbooks.Open($outPath)
     $sheet = $wbOut.Worksheets.Item(1)
+
+    # ---- out.xlsx のフォーマットチェック ----
+    $formatProblems = Test-OutTemplateFormat -sheet $sheet
+    if ($formatProblems.Count -eq 0) {
+        Write-Host "$OutFileName のフォーマットチェック: 正しいです" -ForegroundColor Green
+    } else {
+        Write-Host "$OutFileName のフォーマットチェック: 正しくありません" -ForegroundColor Red
+        foreach ($p in $formatProblems) { Write-Host "  - $p" -ForegroundColor Red }
+        throw "$OutFileName のフォーマットが想定と異なるため、書き込みを中止しました。"
+    }
+
     $usedOut = $sheet.UsedRange
     $lastColOut = [int]$usedOut.Column + [int]$usedOut.Columns.Count - 1
     $lastRowOut = [int]$usedOut.Row + [int]$usedOut.Rows.Count - 1
@@ -148,15 +272,26 @@ try {
     # 現在の最終行までをクリアしてから書き直す(書式は消さない ClearContents を使う)
     $clearLastRow = [Math]::Max($lastRowOut, $dataEndRow)
     if ($clearLastRow -ge $dataStartRow) {
-        $sheet.Range($sheet.Cells($dataStartRow, 1), $sheet.Cells($clearLastRow, $colCount)).ClearContents() | Out-Null
+        $clearRange = $sheet.Range($sheet.Cells($dataStartRow, 1), $sheet.Cells($clearLastRow, $colCount))
+        $clearRange.ClearContents() | Out-Null
+        # 以前のバージョンのスクリプトが4行目以降に "@"(テキスト)書式を付けていたことがあり、
+        # 残ったままだと ファイル名 を複数連結した長い文字列が古いExcelで .Text が "###" に
+        # なる表示不具合を起こす。このスクリプトが書く内容(担当領域/ID/名称/ファイル名/OK/NG)は
+        # そもそも数値と誤認識される心配が無いので、General に戻しておく。
+        # (書式変更が失敗しても致命的ではない――データ自体は Value2 では正しく入っているので、
+        #  ここで処理全体を止めずに警告だけ出す)
+        try {
+            $clearRange.NumberFormat = "General"
+        } catch {
+            Write-Host "  警告: 4行目以降の書式リセットに失敗しました($($_.Exception.Message))。データは正しく書き込まれますが、長いファイル名が '###' と表示される場合があります。" -ForegroundColor Yellow
+        }
     }
 
-    if ($records.Count -gt 0) {
-        # 書き込むデータ範囲だけテキスト書式にする(1~3行目の書式には触れない)。
-        # そうしないと "06" のような数字だけの結果/項番が書き込み時に数値化されてしまう。
-        $dataRange = $sheet.Range($sheet.Cells($dataStartRow, 1), $sheet.Cells($dataEndRow, $colCount))
-        $dataRange.NumberFormat = "@"
-    }
+    # このスクリプトが4行目以降に書き込むのは 担当領域/ID/名称/ファイル名(すべて文字列)と
+    # OK/NG の結果だけで、"06" のような数字だけの項番文字列は書かない(項番は1行目に
+    # 既にある見出しをそのまま使うだけ)。そのため NumberFormat="@" は不要
+    # ——付けると逆に、ファイル名を複数連結した長い文字列が古いExcelで .Text が
+    # "###" になる表示不具合を引き起こす(merge_versions_by_id.ps1 で踏んだのと同じ問題)。
 
     $row = $dataStartRow
     foreach ($item in $records) {
@@ -178,9 +313,25 @@ try {
     $wbOut.Close($false)
     $wbOut = $null
 
-    Write-Host "対象ファイル数: $($records.Count)" -ForegroundColor Green
+    Write-Host "対象ID数: $($records.Count)" -ForegroundColor Green
     Write-Host "項番の列数: $($templateHeaders.Count)" -ForegroundColor Green
     Write-Host "出力しました($dataStartRow 行目から): $outPath" -ForegroundColor Green
+
+    # ---- どの機能(ID)でも一度もチェックされていないチェックリスト項番を洗い出す ----
+    $checkedItemNos = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($item in $records) {
+        foreach ($key in $item.項番結果.Keys) {
+            [void]$checkedItemNos.Add($key)
+        }
+    }
+    $neverChecked = @($templateHeaders | Where-Object { -not $checkedItemNos.Contains($_) })
+
+    if ($neverChecked.Count -gt 0) {
+        Write-Host "どの機能でもチェックされていないチェックリスト項番 ($($neverChecked.Count)件):" -ForegroundColor Yellow
+        foreach ($n in $neverChecked) { Write-Host "  - $n" -ForegroundColor Yellow }
+    } else {
+        Write-Host "すべてのチェックリスト項番が、いずれかの機能でチェックされています。" -ForegroundColor Green
+    }
 }
 catch {
     Write-Host "エラー: $($_.Exception.Message)" -ForegroundColor Red

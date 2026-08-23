@@ -22,7 +22,8 @@
     サブフォルダを含めるかどうか。既定で $true。
 
 .PARAMETER OutFileName
-    出力ファイル名。既定値 "実施記録一覧.xlsx"(スクリプトと同じフォルダに保存)。
+    出力ファイル名。既定値は実行日の日付付きで "yyyyMMdd_実施記録一覧_merge_befor.xlsx"
+    (スクリプトと同じフォルダに保存)。
 
 .EXAMPLE
     .\collect_check_records.ps1
@@ -31,11 +32,13 @@
 param(
     [string]$FolderPath = $PSScriptRoot,
     [bool]$Recurse = $true,
-    [string]$OutFileName = "実施記録一覧.xlsx"
+    [string]$OutFileName = "$(Get-Date -Format 'yyyyMMdd')_実施記録一覧_merge_befor.xlsx"
 )
 
 # 処理対象とするシート名(この2つ以外のシートは無条件でスキップ)
-$TargetSheetNames = @("画面(基本設計)", "帳票(基本設計)")
+$SheetNameScreen = "画面(基本設計)"
+$SheetNameReport = "帳票(基本設計)"
+$TargetSheetNames = @($SheetNameScreen, $SheetNameReport)
 
 # 実施記録のヘッダーを探す際に、項番ヘッダー行から何行下まで見るか
 $RecordHeaderSearchRows = 3
@@ -160,6 +163,16 @@ foreach ($file in $files) {
         $id = $inner
         $label = ""
     }
+
+    # ID の先頭(最初の "_" より前)の分類により読み込むシートを絞り込む
+    # (IO→画面のみ、PT→帳票のみ、それ以外→両方)。この分類値自体は出力列には含めない。
+    $idPrefix = ($id -split '_')[0]
+    switch ($idPrefix) {
+        "IO"    { $sheetsToProcess = @($SheetNameScreen) }
+        "PT"    { $sheetsToProcess = @($SheetNameReport) }
+        default { $sheetsToProcess = $TargetSheetNames }
+    }
+
     $relativePath = $file.DirectoryName.Substring($FolderPath.Length).TrimStart('\')
     $topFolder = ($relativePath -split '\\')[0]
     $relativeFilePath = $file.FullName.Substring($FolderPath.Length).TrimStart('\')
@@ -197,7 +210,7 @@ foreach ($file in $files) {
             throw "ワークブックを開けませんでした(Workbooks.Open が null を返しました)。ファイルが破損しているか、他のプロセスでロックされている可能性があります。"
         }
 
-        foreach ($sheetName in $TargetSheetNames) {
+        foreach ($sheetName in $sheetsToProcess) {
 
             $ws = $null
             foreach ($s in $wb.Worksheets) {
