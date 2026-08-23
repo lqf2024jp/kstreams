@@ -25,7 +25,8 @@ $Sheet.Name = "FileList"
 
 $Sheet.Cells.Item(1, 1) = "Directory"
 $Sheet.Cells.Item(1, 2) = "FileName"
-$Sheet.Range("A1:B1").Font.Bold = $true
+$Sheet.Cells.Item(1, 3) = "MoveToDirectory"
+$Sheet.Range("A1:C1").Font.Bold = $true
 
 $Row = 2
 foreach ($Item in $FileList) {
@@ -36,6 +37,7 @@ foreach ($Item in $FileList) {
 
 $Sheet.Columns.Item(1).AutoFit() | Out-Null
 $Sheet.Columns.Item(2).AutoFit() | Out-Null
+$Sheet.Columns.Item(3).AutoFit() | Out-Null
 
 $Workbook.SaveAs($OutputXlsx, 51)  # 51 = xlOpenXMLWorkbook (.xlsx)
 $Workbook.Close($false)
