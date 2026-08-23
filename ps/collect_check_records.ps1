@@ -165,12 +165,12 @@ foreach ($file in $files) {
     }
 
     # ID の先頭(最初の "_" より前)の分類により読み込むシートを絞り込む
-    # (IO/DL→画面のみ、PT→帳票のみ、それ以外→両方)。この分類値自体は出力列には含めない。
+    # (IO/DL→画面のみ、RP→帳票のみ、それ以外→両方)。この分類値自体は出力列には含めない。
     $idPrefix = ($id -split '_')[0]
     switch ($idPrefix) {
         "IO"    { $sheetsToProcess = @($SheetNameScreen) }
         "DL"    { $sheetsToProcess = @($SheetNameScreen) }
-        "PT"    { $sheetsToProcess = @($SheetNameReport) }
+        "RP"    { $sheetsToProcess = @($SheetNameReport) }
         default { $sheetsToProcess = $TargetSheetNames }
     }
 
