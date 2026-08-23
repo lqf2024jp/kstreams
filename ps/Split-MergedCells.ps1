@@ -119,6 +119,7 @@ Write-Host "----------------------------------------"
 try {
     Write-Host "Excel COMオブジェクトを起動しています..."
     $excel = New-Object -ComObject Excel.Application
+    Write-Host "Excel COMオブジェクトの起動完了"
 }
 catch {
     Write-Host "エラー: Excel COMオブジェクトの作成に失敗しました。" -ForegroundColor Red
@@ -140,6 +141,10 @@ catch {
 $excel.Visible = $false
 $excel.DisplayAlerts = $false
 $excel.ScreenUpdating = $false
+# 「外部リンクを更新しますか?」等の確認ダイアログは DisplayAlerts=$false では
+# 抑制できず、Visible=$false のため見えないまま Workbooks.Open が無反応になる
+# (=スクリプトが固まったように見える)原因になるため、明示的に無効化しておく
+$excel.AskToUpdateLinks = $false
 
 $successCount = 0
 $skipCount = 0
@@ -194,7 +199,13 @@ foreach ($file in $files) {
 
     $wb = $null
     try {
-        $wb = $excel.Workbooks.Open($file.FullName, [Type]::Missing, $false)  # ReadOnly=$false
+        # UpdateLinks=0(外部リンクは更新しない/確認しない), ReadOnly=$false,
+        # IgnoreReadOnlyRecommended=$true(読み取り推奨の確認も出さない)
+        # これらを明示しないと、Visible=$false で見えないダイアログが裏で
+        # 表示されて Open が無反応(=固まったように見える)になることがある
+        Write-Host "  Workbooks.Open 呼び出し開始..."
+        $wb = $excel.Workbooks.Open($file.FullName, 0, $false, [Type]::Missing, [Type]::Missing, [Type]::Missing, $true)
+        Write-Host "  Workbooks.Open 呼び出し完了"
 
         if ($null -eq $wb) {
             throw "ワークブックを開けませんでした(Workbooks.Open が null を返しました)。ファイルが破損しているか、他のプロセスでロックされている可能性があります。"
@@ -264,20 +275,45 @@ foreach ($file in $files) {
                         $topLeftCell = $ws.Cells([int]$mergeArea.Row, [int]$mergeArea.Column)
                         $val = $topLeftCell.Value2
                         if ($null -eq $val) { $val = "" }
+                        $valTypeName = $val.GetType().FullName
 
                         $mRowCountRaw = $mergeArea.Rows.Count
                         $mRowCount = [int]$mRowCountRaw
 
+                        Write-Host "    結合解除開始: 行=$r〜$($r + $mRowCount - 1) 列=$startCol-$endCol (値の型=$valTypeName)"
                         $mergeArea.UnMerge()
+                        Write-Host "    結合解除完了、値の書き込み開始"
 
                         for ($i = 0; $i -lt $mRowCount; $i++) {
                             for ($c = $startCol; $c -le $endCol; $c++) {
                                 $targetRow = [int]($r + $i)
                                 $targetCol = [int]$c
                                 $targetCell = $ws.Cells($targetRow, $targetCol)
-                                $targetCell.Value2 = $val
+                                try {
+                                    $targetCell.Value2 = $val
+                                }
+                                catch {
+                                    # Value2への直接代入がキャスト例外になる環境がある(値の.NET型と
+                                    # Excel COMの版で相性が悪いケース)。原因特定のため型情報を出力した上で、
+                                    # 数値なら double、それ以外は string にキャストして再試行する
+                                    Write-Host "     [診断] Value2直接代入が失敗: 行=$targetRow 列=$targetCol 値の型=$valTypeName 値='$val' エラー=$($_.Exception.Message)" -ForegroundColor Magenta
+                                    $retried = $false
+                                    if ($val -is [double] -or $val -is [int] -or $val -is [int64] -or $val -is [single] -or $val -is [decimal]) {
+                                        try {
+                                            $targetCell.Value2 = [double]$val
+                                            $retried = $true
+                                            Write-Host "     [診断] [double]キャストで再試行→成功" -ForegroundColor Magenta
+                                        }
+                                        catch {}
+                                    }
+                                    if (-not $retried) {
+                                        $targetCell.Value2 = [string]$val
+                                        Write-Host "     [診断] [string]キャストで再試行→成功(セルは文字列型になります)" -ForegroundColor Magenta
+                                    }
+                                }
                             }
                         }
+                        Write-Host "    値の書き込み完了"
                         $changedAny = $true
                         $sheetChanged = $true
                         $r = [int]($r + $mRowCount)
@@ -295,20 +331,26 @@ foreach ($file in $files) {
         if (-not $anyTargetSheetFound) {
             Write-Host "  -> 対象シート(画面(基本設計)/帳票(基本設計))が無いためスキップ" -ForegroundColor Yellow
             $skipCount++
+            Write-Host "  Workbook.Close 呼び出し開始(保存なし)..."
             $wb.Close($false)
+            Write-Host "  Workbook.Close 呼び出し完了"
             $wb = $null
             continue
         }
 
         if ($changedAny) {
             if ($Overwrite) {
+                Write-Host "  Workbook.Save 呼び出し開始(上書き保存)..."
                 $wb.Save()
+                Write-Host "  Workbook.Save 呼び出し完了"
                 Write-Host "  -> 上書き保存しました" -ForegroundColor Green
             }
             else {
                 $newName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name) + $OutSuffix + $file.Extension
                 $newPath = Join-Path $file.DirectoryName $newName
+                Write-Host "  Workbook.SaveAs 呼び出し開始: $newName ..."
                 $wb.SaveAs($newPath)
+                Write-Host "  Workbook.SaveAs 呼び出し完了"
                 Write-Host "  -> 別名保存しました: $newName" -ForegroundColor Green
             }
             $successCount++
@@ -318,7 +360,9 @@ foreach ($file in $files) {
             $skipCount++
         }
 
+        Write-Host "  Workbook.Close 呼び出し開始..."
         $wb.Close($false)
+        Write-Host "  Workbook.Close 呼び出し完了"
         $wb = $null
     }
     catch {
@@ -337,8 +381,10 @@ foreach ($file in $files) {
     }
 }
 
+Write-Host "Excel.Quit 呼び出し開始..."
 try {
     $excel.Quit()
+    Write-Host "Excel.Quit 呼び出し完了"
 }
 catch {
     Write-Host "警告: Excel終了処理でエラー: $($_.Exception.Message)" -ForegroundColor Yellow
