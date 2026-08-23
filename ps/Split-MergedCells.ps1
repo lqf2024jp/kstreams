@@ -48,7 +48,8 @@ param(
     [bool]$Recurse = $true,
     [switch]$Overwrite,
     [string]$OutSuffix = "_split",
-    [int]$HeaderSearchMaxRows = 30
+    [int]$HeaderSearchMaxRows = 30,
+    [string]$LogPath = ""
 )
 
 # 処理対象とするシート名(この2つ以外のシートは無条件でスキップ)
@@ -61,6 +62,31 @@ if ([string]::IsNullOrEmpty($FolderPath)) {
     $FolderPath = (Get-Location).Path
 }
 
+# --- ログをファイルにも残す(客先での不具合切り分け用) ---
+if ([string]::IsNullOrEmpty($LogPath)) {
+    $logDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $LogPath = Join-Path $logDir ("Split-MergedCells_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+}
+try {
+    Start-Transcript -Path $LogPath -Append | Out-Null
+    Write-Host "ログファイル: $LogPath"
+}
+catch {
+    Write-Host "警告: ログファイルの作成に失敗しました($LogPath): $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# --- 実行環境の診断情報(「ローカルでは動くが客先で動かない」原因切り分け用) ---
+Write-Host "===== 実行環境情報 ====="
+Write-Host "実行日時: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Host "PowerShellバージョン: $($PSVersionTable.PSVersion)"
+Write-Host "PowerShellエディション: $($PSVersionTable.PSEdition)"
+Write-Host "プロセスビット数: $(if ([Environment]::Is64BitProcess) { '64bit' } else { '32bit' })"
+Write-Host "OS: $([Environment]::OSVersion.VersionString) / OSビット数: $(if ([Environment]::Is64BitOperatingSystem) { '64bit' } else { '32bit' })"
+Write-Host "実行ユーザー: $([Environment]::UserDomainName)\$([Environment]::UserName)"
+Write-Host "カルチャ: $([System.Globalization.CultureInfo]::CurrentCulture.Name) / UIカルチャ: $([System.Globalization.CultureInfo]::CurrentUICulture.Name)"
+Write-Host "スクリプトパス: $PSCommandPath"
+Write-Host "========================"
+
 Write-Host "対象フォルダ: $FolderPath"
 Write-Host "サブフォルダを含む: $Recurse"
 Write-Host "対象シート: $($TargetSheetNames -join ', ')"
@@ -72,17 +98,45 @@ $getChildParams = @{
 }
 if ($Recurse) { $getChildParams["Recurse"] = $true }
 
+if (-not (Test-Path -LiteralPath $FolderPath -PathType Container)) {
+    Write-Host "エラー: 対象フォルダが存在しません: $FolderPath" -ForegroundColor Red
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 1
+}
+
 $files = Get-ChildItem @getChildParams | Where-Object { $_.Name -notlike "~$*" }
 
 if ($files.Count -eq 0) {
     Write-Host "処理対象の .xlsx ファイルが見つかりませんでした。"
+    try { Stop-Transcript | Out-Null } catch {}
     exit
 }
 
 Write-Host "対象ファイル数: $($files.Count)"
+$files | ForEach-Object { Write-Host "  - $($_.FullName) ($($_.Length) bytes)" }
 Write-Host "----------------------------------------"
 
-$excel = New-Object -ComObject Excel.Application
+try {
+    Write-Host "Excel COMオブジェクトを起動しています..."
+    $excel = New-Object -ComObject Excel.Application
+}
+catch {
+    Write-Host "エラー: Excel COMオブジェクトの作成に失敗しました。" -ForegroundColor Red
+    Write-Host "  → このマシンに Microsoft Excel がインストールされていないか、" -ForegroundColor Red
+    Write-Host "    COMコンポーネントが正しく登録されていない可能性があります。" -ForegroundColor Red
+    Write-Host "  例外メッセージ: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  例外種別: $($_.Exception.GetType().FullName)" -ForegroundColor DarkRed
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 1
+}
+
+try {
+    Write-Host "Excelバージョン: $($excel.Version) / Build: $($excel.Build)"
+}
+catch {
+    Write-Host "警告: Excelバージョン情報の取得に失敗しました: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 $excel.Visible = $false
 $excel.DisplayAlerts = $false
 $excel.ScreenUpdating = $false
@@ -133,6 +187,11 @@ foreach ($file in $files) {
         continue
     }
 
+    # エラー発生時にどこで止まったか分かるように、処理中のシート/行/列を都度記録しておく
+    $currentSheetName = $null
+    $currentRow = $null
+    $currentCol = $null
+
     $wb = $null
     try {
         $wb = $excel.Workbooks.Open($file.FullName, [Type]::Missing, $false)  # ReadOnly=$false
@@ -140,10 +199,15 @@ foreach ($file in $files) {
         if ($null -eq $wb) {
             throw "ワークブックを開けませんでした(Workbooks.Open が null を返しました)。ファイルが破損しているか、他のプロセスでロックされている可能性があります。"
         }
+
+        $allSheetNames = @($wb.Worksheets | ForEach-Object { $_.Name })
+        Write-Host "  ブック内の全シート名: $($allSheetNames -join ' / ')"
+
         $changedAny = $false
         $anyTargetSheetFound = $false
 
         foreach ($sheetName in $TargetSheetNames) {
+            $currentSheetName = $sheetName
 
             $ws = $null
             foreach ($s in $wb.Worksheets) {
@@ -151,6 +215,7 @@ foreach ($file in $files) {
             }
             if ($null -eq $ws) {
                 # このファイルには該当シートが存在しない -> スキップ
+                # (名前が完全一致しないだけの可能性もあるため、実際のシート名は上の一覧で確認できる)
                 continue
             }
             $anyTargetSheetFound = $true
@@ -159,9 +224,10 @@ foreach ($file in $files) {
             $headerCell = Find-HeaderCell -ws $ws -maxRows $HeaderSearchMaxRows
 
             if ($null -eq $headerCell) {
-                Write-Host "  [$sheetName] 「項番」ヘッダーが見つからず、スキップ" -ForegroundColor Yellow
+                Write-Host "  [$sheetName] 「項番」ヘッダーが見つからず、スキップ(先頭 $HeaderSearchMaxRows 行以内に見つかりませんでした)" -ForegroundColor Yellow
                 continue
             }
+            Write-Host "  [$sheetName] 「項番」ヘッダー発見: 行=$($headerCell.Row) 列=$($headerCell.Column)"
 
             $headerMerge = $headerCell.MergeArea
             $headerEndRow = $headerMerge.Row + $headerMerge.Rows.Count - 1
@@ -181,6 +247,8 @@ foreach ($file in $files) {
             $r = $headerEndRow + 1
             $sheetChanged = $false
             while ($r -le $lastRow) {
+                $currentRow = $r
+                $currentCol = $startCol
                 $cell = $ws.Cells($r, $startCol)
                 if ($cell.MergeCells -eq $true) {
                     $mergeArea = $cell.MergeArea
@@ -196,8 +264,6 @@ foreach ($file in $files) {
                         $topLeftCell = $ws.Cells([int]$mergeArea.Row, [int]$mergeArea.Column)
                         $val = $topLeftCell.Value2
                         if ($null -eq $val) { $val = "" }
-                        # [DEBUG] 210行目の InvalidCastException 調査用。原因判明後に削除。
-                        Write-Host "    [DEBUG] val='$val' / type=$($val.GetType().FullName)" -ForegroundColor DarkGray
 
                         $mRowCountRaw = $mergeArea.Rows.Count
                         $mRowCount = [int]$mRowCountRaw
@@ -258,6 +324,9 @@ foreach ($file in $files) {
     catch {
         Write-Host "  -> エラー: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "     発生行: $($_.InvocationInfo.ScriptLineNumber) / 例外種別: $($_.Exception.GetType().FullName)" -ForegroundColor DarkRed
+        Write-Host "     処理中だったシート: $currentSheetName / 行: $currentRow / 列: $currentCol" -ForegroundColor DarkRed
+        Write-Host "     ファイル: $($file.FullName)" -ForegroundColor DarkRed
+        Write-Host "     HResult: $($_.Exception.HResult) / スタックトレース:`n$($_.ScriptStackTrace)" -ForegroundColor DarkRed
         if ($_.Exception.InnerException) {
             Write-Host "     内部例外: $($_.Exception.InnerException.Message)" -ForegroundColor DarkRed
         }
@@ -268,10 +337,18 @@ foreach ($file in $files) {
     }
 }
 
-$excel.Quit()
+try {
+    $excel.Quit()
+}
+catch {
+    Write-Host "警告: Excel終了処理でエラー: $($_.Exception.Message)" -ForegroundColor Yellow
+}
 [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
 [System.GC]::Collect()
 [System.GC]::WaitForPendingFinalizers()
 
 Write-Host "----------------------------------------"
 Write-Host "完了: 成功 $successCount 件 / スキップ $skipCount 件 / エラー $errorCount 件"
+Write-Host "ログファイル: $LogPath"
+
+try { Stop-Transcript | Out-Null } catch {}
